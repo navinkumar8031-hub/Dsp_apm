@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 void main() => runApp(const DspApp());
@@ -28,7 +29,7 @@ class DspControlScreen extends StatefulWidget {
 class _DspControlScreenState extends State<DspControlScreen> {
   Color accentColor = const Color(0xFF00F2FE);
 
-  // Network & Connection
+  // Network & Persistent IP
   String espIp = "192.168.43.100";
   WebSocketChannel? channel;
   bool isConnected = false;
@@ -36,9 +37,13 @@ class _DspControlScreenState extends State<DspControlScreen> {
   String statusMessage = "DISCONNECTED";
   Timer? reconnectTimer;
 
+  // Sleep Timer Countdown State
+  String sleepTimer = "OFF";
+  int remainingSeconds = 0;
+  Timer? countdownTimer;
+
   // Audio & DSP State
   String inputSource = "BT AUDIO";
-  String sleepTimer = "OFF";
   double masterVol = 4;
   double subVol = 20;
   double bass = 0;
@@ -56,20 +61,37 @@ class _DspControlScreenState extends State<DspControlScreen> {
   @override
   void initState() {
     super.initState();
-    connectWebSocket();
+    _loadSavedIpAndConnect();
   }
 
   @override
   void dispose() {
     reconnectTimer?.cancel();
+    countdownTimer?.cancel();
     channel?.sink.close();
     super.dispose();
   }
 
-  void _notifyConnectionSuccess() {
-    // Flutter Built-in Native Vibration (Zero Gradle dependency)
-    HapticFeedback.vibrate();
+  // Load Saved IP from Phone Memory
+  Future<void> _loadSavedIpAndConnect() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? savedIp = prefs.getString('saved_esp_ip');
+    if (savedIp != null && savedIp.isNotEmpty) {
+      setState(() {
+        espIp = savedIp;
+      });
+    }
+    connectWebSocket();
+  }
 
+  // Save IP to Phone Memory
+  Future<void> _saveIp(String ip) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('saved_esp_ip', ip);
+  }
+
+  void _notifyConnectionSuccess() {
+    HapticFeedback.vibrate();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -174,11 +196,64 @@ class _DspControlScreenState extends State<DspControlScreen> {
       case "GAIN": gain = (double.tryParse(val) ?? gain).clamp(0, 15); break;
       case "LOUD": loudness = (double.tryParse(val) ?? loudness).clamp(0, 15); break;
       case "INP": inputSource = val; break;
-      case "SLP": sleepTimer = val; break;
+      case "SLP":
+        if (val == "OFF" && sleepTimer != "OFF") {
+          _stopSleepTimer();
+        }
+        break;
       case "SUBCUT": subCutoff = val; break;
       case "BCTR": bassCenter = val; break;
       case "TRECUT": trebleCutoff = val; break;
     }
+  }
+
+  // Sleep Timer Countdown Logic
+  void _setSleepTimer(String time) {
+    countdownTimer?.cancel();
+    if (time == "OFF") {
+      _stopSleepTimer();
+      sendWsPacket("SLP", "OFF");
+      return;
+    }
+
+    int minutes = int.tryParse(time.replaceAll("m", "")) ?? 0;
+    if (minutes > 0) {
+      setState(() {
+        sleepTimer = time;
+        remainingSeconds = minutes * 60;
+      });
+
+      sendWsPacket("SLP", time);
+
+      countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (remainingSeconds > 0) {
+          setState(() {
+            remainingSeconds--;
+          });
+        } else {
+          timer.cancel();
+          setState(() {
+            sleepTimer = "OFF";
+            remainingSeconds = 0;
+          });
+        }
+      });
+    }
+  }
+
+  void _stopSleepTimer() {
+    countdownTimer?.cancel();
+    setState(() {
+      sleepTimer = "OFF";
+      remainingSeconds = 0;
+    });
+  }
+
+  String _formatTimerCountdown() {
+    if (sleepTimer == "OFF" || remainingSeconds <= 0) return "OFF";
+    int m = remainingSeconds ~/ 60;
+    int s = remainingSeconds % 60;
+    return "${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}";
   }
 
   int lastSend = 0;
@@ -201,7 +276,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text("Enter the IP from Serial Monitor:", style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13)),
+            const Text("Enter IP (Saved automatically):", style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13)),
             const SizedBox(height: 8),
             TextField(
               controller: controller,
@@ -219,14 +294,18 @@ class _DspControlScreenState extends State<DspControlScreen> {
         actions: [
           TextButton(
             onPressed: () {
-              setState(() {
-                espIp = controller.text.trim();
-              });
-              Navigator.pop(ctx);
-              channel?.sink.close();
-              connectWebSocket();
+              String newIp = controller.text.trim();
+              if (newIp.isNotEmpty) {
+                setState(() {
+                  espIp = newIp;
+                });
+                _saveIp(newIp);
+                Navigator.pop(ctx);
+                channel?.sink.close();
+                connectWebSocket();
+              }
             },
-            child: Text("CONNECT", style: TextStyle(color: accentColor, fontWeight: FontWeight.bold)),
+            child: Text("CONNECT & SAVE", style: TextStyle(color: accentColor, fontWeight: FontWeight.bold)),
           )
         ],
       ),
@@ -264,7 +343,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Connection Status Bar with Visual Badges
+            // Connection Status Bar
             GestureDetector(
               onTap: _showIpDialog,
               child: AnimatedContainer(
@@ -347,7 +426,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Sleep Timer
+            // Sleep Timer Card with Live Countdown
             _cardContainer(
               child: Column(
                 children: [
@@ -355,7 +434,24 @@ class _DspControlScreenState extends State<DspControlScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Text("Sleep Timer", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                      Text(sleepTimer, style: const TextStyle(color: Color(0xFF7D8B99), fontWeight: FontWeight.bold)),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: sleepTimer != "OFF" ? const Color(0xFF1C273E) : Colors.transparent,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: sleepTimer != "OFF" ? accentColor : Colors.transparent,
+                          ),
+                        ),
+                        child: Text(
+                          _formatTimerCountdown(),
+                          style: TextStyle(
+                            color: sleepTimer != "OFF" ? accentColor : const Color(0xFF7D8B99),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 10),
@@ -364,10 +460,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
                       bool active = sleepTimer == time;
                       return Expanded(
                         child: GestureDetector(
-                          onTap: () {
-                            setState(() => sleepTimer = time);
-                            sendWsPacket("SLP", time);
-                          },
+                          onTap: () => _setSleepTimer(time),
                           child: Container(
                             margin: const EdgeInsets.symmetric(horizontal: 2),
                             padding: const EdgeInsets.symmetric(vertical: 8),
@@ -377,7 +470,14 @@ class _DspControlScreenState extends State<DspControlScreen> {
                               borderRadius: BorderRadius.circular(8),
                               border: Border.all(color: active ? const Color(0xFF1E2C45) : Colors.transparent),
                             ),
-                            child: Text(time, style: TextStyle(color: active ? accentColor : const Color(0xFF7D8B99), fontWeight: FontWeight.bold, fontSize: 12)),
+                            child: Text(
+                              time,
+                              style: TextStyle(
+                                color: active ? accentColor : const Color(0xFF7D8B99),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
                           ),
                         ),
                       );

@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository Code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Setup Java 17
@@ -24,21 +24,26 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate Clean Flutter Project Structure
+      - name: Create Clean Modern Flutter App
         run: |
-          mkdir temp_src
-          cp -r lib temp_src/
-          cp pubspec.yaml temp_src/
-          flutter create --org com.example --project-name dsp_app .
-          cp -r temp_src/lib .
-          cp temp_src/pubspec.yaml .
-          rm -rf temp_src
+          mkdir /tmp/dsp_backup
+          cp -r lib /tmp/dsp_backup/
+          cp pubspec.yaml /tmp/dsp_backup/
+          rm -rf *
+          flutter create --org com.nvaudio --project-name dsp_app .
+          cp -r /tmp/dsp_backup/lib .
+          cp /tmp/dsp_backup/pubspec.yaml .
 
-      - name: Inject Bluetooth Permissions to Manifest
+      - name: Add BLE Permissions
         run: |
           sed -i '/<application/i \    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />' android/app/src/main/AndroidManifest.xml
 
-      - name: Install Flutter Dependencies
+      - name: Set Minimum Android SDK
+        run: |
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle || true
+
+      - name: Get Dependencies
         run: flutter pub get
 
       - name: Build Standalone Release APK

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:vibration/vibration.dart';
 
 void main() => runApp(const DspApp());
 
@@ -66,14 +66,10 @@ class _DspControlScreenState extends State<DspControlScreen> {
     super.dispose();
   }
 
-  void _notifyConnectionSuccess() async {
-    // Phone vibrate karega
-    bool? hasVib = await Vibration.hasVibrator();
-    if (hasVib == true) {
-      Vibration.vibrate(duration: 80);
-    }
+  void _notifyConnectionSuccess() {
+    // Flutter Built-in Native Vibration (Zero Gradle dependency)
+    HapticFeedback.vibrate();
 
-    // Green toast banner show karega
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(

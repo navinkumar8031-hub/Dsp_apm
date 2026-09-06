@@ -9,25 +9,39 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v3
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.x'
           channel: 'stable'
+          cache: true
 
-      - name: Get Packages
+      - name: Recreate Clean Flutter Project Structure
+        run: |
+          mkdir temp_src
+          cp -r lib temp_src/
+          cp pubspec.yaml temp_src/
+          flutter create --org com.example --project-name dsp_app .
+          cp -r temp_src/lib .
+          cp temp_src/pubspec.yaml .
+          rm -rf temp_src
+
+      - name: Inject Bluetooth Permissions to Manifest
+        run: |
+          sed -i '/<application/i \    <uses-permission android:name="android.permission.BLUETOOTH" />\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />' android/app/src/main/AndroidManifest.xml
+
+      - name: Install Flutter Dependencies
         run: flutter pub get
 
-      - name: Build Release APK
+      - name: Build Standalone Release APK
         run: flutter build apk --release
 
       - name: Upload APK Artifact

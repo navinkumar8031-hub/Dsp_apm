@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -25,24 +26,22 @@ class DspControlScreen extends StatefulWidget {
 }
 
 class _DspControlScreenState extends State<DspControlScreen> {
-  // Theme State
   Color accentColor = const Color(0xFF00F2FE);
 
-  // App Parameters
+  // Audio & DSP State (Matches Hardware Defaults)
   String inputSource = "BT AUDIO";
   String sleepTimer = "OFF";
-  double masterVol = 8;
-  double subVol = 25;
-  double bass = -5;
-  double mid = 5;
-  double treble = 10;
+  double masterVol = 4; // Default boot value 4/29
+  double subVol = 20;
+  double bass = 0;
+  double mid = 0;
+  double treble = 0;
   double gain = 5;
   double loudness = 5;
   String subCutoff = "80 Hz (Tight Bass)";
   String bassCenter = "60 Hz (Sub Bass)";
   String trebleCutoff = "12.5 kHz (Crisp)";
 
-  // Accordion Toggles
   bool toneOpen = false;
   bool filterOpen = false;
 
@@ -50,43 +49,149 @@ class _DspControlScreenState extends State<DspControlScreen> {
   BluetoothDevice? connectedDevice;
   BluetoothCharacteristic? targetCharacteristic;
   bool isConnected = false;
+  bool isConnecting = false;
+  StreamSubscription<List<int>>? notifySubscription;
 
   final String serviceUuid = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
   final String charUuid = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
-  // BLE Scan & Connect
+  @override
+  void dispose() {
+    notifySubscription?.cancel();
+    super.dispose();
+  }
+
+  // BLE Connection & Setup Listeners
   void connectToESP32() async {
-    FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
-    FlutterBluePlus.scanResults.listen((results) async {
-      for (ScanResult r in results) {
-        if (r.device.platformName == "DSP_Amplifier_BT") {
-          await FlutterBluePlus.stopScan();
-          await r.device.connect();
-          setState(() {
-            connectedDevice = r.device;
-            isConnected = true;
-          });
-          var services = await r.device.discoverServices();
-          for (var s in services) {
-            if (s.uuid.toString() == serviceUuid) {
-              for (var c in s.characteristics) {
-                if (c.uuid.toString() == charUuid) {
-                  targetCharacteristic = c;
+    if (isConnecting || isConnected) return;
+
+    setState(() => isConnecting = true);
+
+    try {
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
+      FlutterBluePlus.scanResults.listen((results) async {
+        for (ScanResult r in results) {
+          if (r.device.platformName == "DSP_Amplifier_BT") {
+            await FlutterBluePlus.stopScan();
+            await r.device.connect(autoConnect: true);
+
+            setState(() {
+              connectedDevice = r.device;
+              isConnected = true;
+              isConnecting = false;
+            });
+
+            var services = await r.device.discoverServices();
+            for (var s in services) {
+              if (s.uuid.toString().toLowerCase() == serviceUuid.toLowerCase()) {
+                for (var c in s.characteristics) {
+                  if (c.uuid.toString().toLowerCase() == charUuid.toLowerCase()) {
+                    targetCharacteristic = c;
+                    _setupIncomingDataListener(c);
+                    // Ask ESP32 to send all NVS and boot values
+                    _requestInitialSync();
+                  }
                 }
               }
             }
+            break;
           }
-          break;
         }
-      }
+      });
+    } catch (e) {
+      setState(() => isConnecting = false);
+    }
+  }
+
+  // Request Hardware State
+  void _requestInitialSync() {
+    if (targetCharacteristic != null) {
+      targetCharacteristic!.write(utf8.encode("REQ_SYNC\n"), withoutResponse: true);
+    }
+  }
+
+  // Listen for ESP32 notifications (Encoder Turns / NVS Sync)
+  void _setupIncomingDataListener(BluetoothCharacteristic c) async {
+    await c.setNotifyValue(true);
+    notifySubscription = c.lastValueStream.listen((bytes) {
+      if (bytes.isEmpty) return;
+      String received = utf8.decode(bytes).trim();
+      _handleIncomingPacket(received);
     });
   }
 
-  // Fast Throttled Packet Sender
+  // Parse Data Coming From ESP32
+  void _handleIncomingPacket(String packet) {
+    if (packet.startsWith("SYNC:")) {
+      // Full Sync: "SYNC:VOL=4;SUB=20;BAS=0;MID=0;TRE=0;GAIN=5;LOUD=5;INP=BT AUDIO;SLP=OFF;SUBCUT=80 Hz (Tight Bass);BCTR=60 Hz (Sub Bass);TRECUT=12.5 kHz (Crisp)"
+      String dataPart = packet.substring(5);
+      List<String> items = dataPart.split(";");
+      setState(() {
+        for (String item in items) {
+          List<String> kv = item.split("=");
+          if (kv.length == 2) {
+            _updateSingleParam(kv[0], kv[1]);
+          }
+        }
+      });
+    } else if (packet.startsWith("EVT:")) {
+      // Single live event (e.g. Physical rotary encoder rotated): "EVT:VOL=12"
+      String dataPart = packet.substring(4);
+      List<String> kv = dataPart.split("=");
+      if (kv.length == 2) {
+        setState(() {
+          _updateSingleParam(kv[0], kv[1]);
+        });
+      }
+    }
+  }
+
+  void _updateSingleParam(String key, String val) {
+    switch (key) {
+      case "VOL":
+        masterVol = (double.tryParse(val) ?? masterVol).clamp(0, 30);
+        break;
+      case "SUB":
+        subVol = (double.tryParse(val) ?? subVol).clamp(0, 30);
+        break;
+      case "BAS":
+        bass = (double.tryParse(val) ?? bass).clamp(-14, 14);
+        break;
+      case "MID":
+        mid = (double.tryParse(val) ?? mid).clamp(-14, 14);
+        break;
+      case "TRE":
+        treble = (double.tryParse(val) ?? treble).clamp(-14, 14);
+        break;
+      case "GAIN":
+        gain = (double.tryParse(val) ?? gain).clamp(0, 15);
+        break;
+      case "LOUD":
+        loudness = (double.tryParse(val) ?? loudness).clamp(0, 10);
+        break;
+      case "INP":
+        inputSource = val;
+        break;
+      case "SLP":
+        sleepTimer = val;
+        break;
+      case "SUBCUT":
+        subCutoff = val;
+        break;
+      case "BCTR":
+        bassCenter = val;
+        break;
+      case "TRECUT":
+        trebleCutoff = val;
+        break;
+    }
+  }
+
+  // Throttle Sending to ESP32 (Prevents jamming)
   int lastSend = 0;
   void sendBlePacket(String key, dynamic value) {
     int now = DateTime.now().millisecondsSinceEpoch;
-    if (now - lastSend > 40 && targetCharacteristic != null) {
+    if (now - lastSend > 35 && targetCharacteristic != null) {
       lastSend = now;
       String payload = "$key:$value\n";
       targetCharacteristic!.write(utf8.encode(payload), withoutResponse: true);
@@ -100,7 +205,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
         child: ListView(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           children: [
-            // Title & BLE Status
             Center(
               child: Text(
                 "NV AUDIO DSP",
@@ -114,7 +218,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 8),
 
-            // Color Palette Selector
+            // Color Palette
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -126,11 +230,11 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Connection Button
+            // Connect Button
             GestureDetector(
               onTap: connectToESP32,
               child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 8),
+                padding: const EdgeInsets.symmetric(vertical: 9),
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   color: const Color(0xFF131C2E),
@@ -138,8 +242,14 @@ class _DspControlScreenState extends State<DspControlScreen> {
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Text(
-                  isConnected ? "CONNECTED TO ESP32" : "TAP TO CONNECT (BLE)",
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: accentColor),
+                  isConnected
+                      ? "● CONNECTED TO DSP (SYNCED)"
+                      : (isConnecting ? "SEARCHING FOR DSP..." : "TAP TO CONNECT (BLE)"),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: isConnected ? const Color(0xFF00E676) : accentColor,
+                  ),
                 ),
               ),
             ),
@@ -311,7 +421,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
     );
   }
 
-  // Helpers & Custom Widgets
   Widget _buildDot(Color c) {
     bool active = accentColor == c;
     return GestureDetector(

@@ -37,10 +37,9 @@ class _DspControlScreenState extends State<DspControlScreen> {
   String statusMessage = "DISCONNECTED";
   Timer? reconnectTimer;
 
-  // Sleep Timer Countdown State
-  String sleepTimer = "OFF";
+  // Hardware Synced Sleep Timer State
   int remainingSeconds = 0;
-  Timer? countdownTimer;
+  Timer? localTicker;
 
   // Audio & DSP State
   String inputSource = "BT AUDIO";
@@ -62,17 +61,28 @@ class _DspControlScreenState extends State<DspControlScreen> {
   void initState() {
     super.initState();
     _loadSavedIpAndConnect();
+    _startLocalTicker();
   }
 
   @override
   void dispose() {
     reconnectTimer?.cancel();
-    countdownTimer?.cancel();
+    localTicker?.cancel();
     channel?.sink.close();
     super.dispose();
   }
 
-  // Load Saved IP from Phone Memory
+  // Local clock tick for smooth 1-second decrement on UI
+  void _startLocalTicker() {
+    localTicker = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (remainingSeconds > 0) {
+        setState(() {
+          remainingSeconds--;
+        });
+      }
+    });
+  }
+
   Future<void> _loadSavedIpAndConnect() async {
     final prefs = await SharedPreferences.getInstance();
     String? savedIp = prefs.getString('saved_esp_ip');
@@ -84,7 +94,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
     connectWebSocket();
   }
 
-  // Save IP to Phone Memory
   Future<void> _saveIp(String ip) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('saved_esp_ip', ip);
@@ -196,10 +205,10 @@ class _DspControlScreenState extends State<DspControlScreen> {
       case "GAIN": gain = (double.tryParse(val) ?? gain).clamp(0, 15); break;
       case "LOUD": loudness = (double.tryParse(val) ?? loudness).clamp(0, 15); break;
       case "INP": inputSource = val; break;
-      case "SLP":
-        if (val == "OFF" && sleepTimer != "OFF") {
-          _stopSleepTimer();
-        }
+      case "SLP_SEC":
+        // Sync hardware timer directly from ESP32 clock
+        int sec = int.tryParse(val) ?? 0;
+        remainingSeconds = sec;
         break;
       case "SUBCUT": subCutoff = val; break;
       case "BCTR": bassCenter = val; break;
@@ -207,11 +216,12 @@ class _DspControlScreenState extends State<DspControlScreen> {
     }
   }
 
-  // Sleep Timer Countdown Logic
+  // Set Sleep Timer on ESP32
   void _setSleepTimer(String time) {
-    countdownTimer?.cancel();
     if (time == "OFF") {
-      _stopSleepTimer();
+      setState(() {
+        remainingSeconds = 0;
+      });
       sendWsPacket("SLP", "OFF");
       return;
     }
@@ -219,38 +229,14 @@ class _DspControlScreenState extends State<DspControlScreen> {
     int minutes = int.tryParse(time.replaceAll("m", "")) ?? 0;
     if (minutes > 0) {
       setState(() {
-        sleepTimer = time;
         remainingSeconds = minutes * 60;
       });
-
       sendWsPacket("SLP", time);
-
-      countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (remainingSeconds > 0) {
-          setState(() {
-            remainingSeconds--;
-          });
-        } else {
-          timer.cancel();
-          setState(() {
-            sleepTimer = "OFF";
-            remainingSeconds = 0;
-          });
-        }
-      });
     }
   }
 
-  void _stopSleepTimer() {
-    countdownTimer?.cancel();
-    setState(() {
-      sleepTimer = "OFF";
-      remainingSeconds = 0;
-    });
-  }
-
   String _formatTimerCountdown() {
-    if (sleepTimer == "OFF" || remainingSeconds <= 0) return "OFF";
+    if (remainingSeconds <= 0) return "OFF";
     int m = remainingSeconds ~/ 60;
     int s = remainingSeconds % 60;
     return "${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}";
@@ -273,7 +259,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
         backgroundColor: const Color(0xFF131C2E),
         title: const Text("ESP32 IP Setup", style: TextStyle(color: Colors.white)),
         content: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize: dynamicSize(context),
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text("Enter IP (Saved automatically):", style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13)),
@@ -311,6 +297,8 @@ class _DspControlScreenState extends State<DspControlScreen> {
       ),
     );
   }
+
+  MainAxisSize dynamicSize(BuildContext context) => MainAxisSize.min;
 
   @override
   Widget build(BuildContext context) {
@@ -426,7 +414,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Sleep Timer Card with Live Countdown
+            // Sleep Timer Card with Hardware-Synced Countdown
             _cardContainer(
               child: Column(
                 children: [
@@ -437,16 +425,16 @@ class _DspControlScreenState extends State<DspControlScreen> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                         decoration: BoxDecoration(
-                          color: sleepTimer != "OFF" ? const Color(0xFF1C273E) : Colors.transparent,
+                          color: remainingSeconds > 0 ? const Color(0xFF1C273E) : Colors.transparent,
                           borderRadius: BorderRadius.circular(6),
                           border: Border.all(
-                            color: sleepTimer != "OFF" ? accentColor : Colors.transparent,
+                            color: remainingSeconds > 0 ? accentColor : Colors.transparent,
                           ),
                         ),
                         child: Text(
                           _formatTimerCountdown(),
                           style: TextStyle(
-                            color: sleepTimer != "OFF" ? accentColor : const Color(0xFF7D8B99),
+                            color: remainingSeconds > 0 ? accentColor : const Color(0xFF7D8B99),
                             fontWeight: FontWeight.bold,
                             fontSize: 12,
                           ),
@@ -457,7 +445,15 @@ class _DspControlScreenState extends State<DspControlScreen> {
                   const SizedBox(height: 10),
                   Row(
                     children: ["OFF", "15m", "30m", "45m", "60m"].map((time) {
-                      bool active = sleepTimer == time;
+                      bool isOptionActive = false;
+                      if (time == "OFF") {
+                        isOptionActive = remainingSeconds == 0;
+                      } else {
+                        int m = int.tryParse(time.replaceAll("m", "")) ?? 0;
+                        // Active button highlight based on remaining range
+                        isOptionActive = remainingSeconds > (m - 15) * 60 && remainingSeconds <= m * 60;
+                      }
+
                       return Expanded(
                         child: GestureDetector(
                           onTap: () => _setSleepTimer(time),
@@ -466,14 +462,14 @@ class _DspControlScreenState extends State<DspControlScreen> {
                             padding: const EdgeInsets.symmetric(vertical: 8),
                             alignment: Alignment.center,
                             decoration: BoxDecoration(
-                              color: active ? const Color(0xFF1C273E) : Colors.transparent,
+                              color: isOptionActive ? const Color(0xFF1C273E) : Colors.transparent,
                               borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: active ? const Color(0xFF1E2C45) : Colors.transparent),
+                              border: Border.all(color: isOptionActive ? const Color(0xFF1E2C45) : Colors.transparent),
                             ),
                             child: Text(
                               time,
                               style: TextStyle(
-                                color: active ? accentColor : const Color(0xFF7D8B99),
+                                color: isOptionActive ? accentColor : const Color(0xFF7D8B99),
                                 fontWeight: FontWeight.bold,
                                 fontSize: 12,
                               ),

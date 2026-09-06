@@ -10,6 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   web_socket_channel: ^2.4.1
+  shared_preferences: ^2.2.2
 
 flutter:
   uses-material-design: true

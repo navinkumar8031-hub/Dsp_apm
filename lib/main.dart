@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:vibration/vibration.dart';
 
 void main() => runApp(const DspApp());
 
@@ -27,17 +28,18 @@ class DspControlScreen extends StatefulWidget {
 class _DspControlScreenState extends State<DspControlScreen> {
   Color accentColor = const Color(0xFF00F2FE);
 
-  // ESP32 IP Address (Change or set via dialog)
-  String espIp = "192.168.43.100"; // Default, editable in app
+  // Network & Connection
+  String espIp = "192.168.43.100";
   WebSocketChannel? channel;
   bool isConnected = false;
   bool isConnecting = false;
+  String statusMessage = "DISCONNECTED";
   Timer? reconnectTimer;
 
   // Audio & DSP State
   String inputSource = "BT AUDIO";
   String sleepTimer = "OFF";
-  double masterVol = 4; // Startup 4/29
+  double masterVol = 4;
   double subVol = 20;
   double bass = 0;
   double mid = 0;
@@ -64,12 +66,47 @@ class _DspControlScreenState extends State<DspControlScreen> {
     super.dispose();
   }
 
+  void _notifyConnectionSuccess() async {
+    // Phone vibrate karega
+    bool? hasVib = await Vibration.hasVibrator();
+    if (hasVib == true) {
+      Vibration.vibrate(duration: 80);
+    }
+
+    // Green toast banner show karega
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Row(
+            children: [
+              Icon(Icons.check_circle_rounded, color: Colors.black, size: 20),
+              SizedBox(width: 10),
+              Text(
+                "ESP32 Connected & Synced!",
+                style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          backgroundColor: const Color(0xFF00E676),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      );
+    }
+  }
+
   void connectWebSocket() {
-    if (isConnected || isConnecting) return;
-    setState(() => isConnecting = true);
+    if (isConnected) return;
+
+    setState(() {
+      isConnecting = true;
+      statusMessage = "CONNECTING TO $espIp...";
+    });
 
     try {
       final wsUrl = Uri.parse('ws://$espIp/ws');
+      channel?.sink.close();
       channel = WebSocketChannel.connect(wsUrl);
 
       channel!.stream.listen(
@@ -78,35 +115,40 @@ class _DspControlScreenState extends State<DspControlScreen> {
             setState(() {
               isConnected = true;
               isConnecting = false;
+              statusMessage = "CONNECTED (SYNCED)";
             });
+            _notifyConnectionSuccess();
           }
           _handleIncomingData(message.toString());
         },
         onDone: () {
-          _handleDisconnect();
+          _handleDisconnect("Socket Closed");
         },
         onError: (error) {
-          _handleDisconnect();
+          _handleDisconnect("Failed: Check IP/Hotspot");
         },
       );
 
-      // Request current status
-      sendWsPacket("REQ_SYNC", "");
+      Future.delayed(const Duration(milliseconds: 300), () {
+        if (channel != null) {
+          channel!.sink.add("REQ_SYNC");
+        }
+      });
     } catch (e) {
-      _handleDisconnect();
+      _handleDisconnect("Error connecting");
     }
   }
 
-  void _handleDisconnect() {
+  void _handleDisconnect(String reason) {
     if (mounted) {
       setState(() {
         isConnected = false;
         isConnecting = false;
+        statusMessage = reason;
       });
     }
-    // Auto Reconnect retry
     reconnectTimer?.cancel();
-    reconnectTimer = Timer(const Duration(seconds: 3), () {
+    reconnectTimer = Timer(const Duration(seconds: 4), () {
       if (!isConnected) connectWebSocket();
     });
   }
@@ -158,11 +200,25 @@ class _DspControlScreenState extends State<DspControlScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF131C2E),
-        title: const Text("ESP32 IP Address", style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: controller,
-          style: const TextStyle(color: Colors.white),
-          decoration: const InputDecoration(hintText: "e.g. 192.168.43.100"),
+        title: const Text("ESP32 IP Setup", style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text("Enter the IP from Serial Monitor:", style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: "192.168.43.100",
+                hintStyle: const TextStyle(color: Colors.white24),
+                filled: true,
+                fillColor: const Color(0xFF1C273E),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -174,7 +230,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
               channel?.sink.close();
               connectWebSocket();
             },
-            child: Text("CONNECT", style: TextStyle(color: accentColor)),
+            child: Text("CONNECT", style: TextStyle(color: accentColor, fontWeight: FontWeight.bold)),
           )
         ],
       ),
@@ -201,7 +257,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 8),
 
-            // Theme Dots
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -213,37 +268,67 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Connection Status & IP Button
+            // Connection Status Bar with Visual Badges
             GestureDetector(
               onTap: _showIpDialog,
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 12),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF131C2E),
-                  border: Border.all(color: const Color(0xFF1E2C45)),
+                  color: isConnected ? const Color(0xFF0C241B) : const Color(0xFF131C2E),
+                  border: Border.all(
+                    color: isConnected ? const Color(0xFF00E676) : const Color(0xFF1E2C45),
+                    width: isConnected ? 1.5 : 1,
+                  ),
                   borderRadius: BorderRadius.circular(10),
+                  boxShadow: isConnected
+                      ? [
+                          BoxShadow(
+                            color: const Color(0xFF00E676).withOpacity(0.2),
+                            blurRadius: 10,
+                            spreadRadius: 1,
+                          )
+                        ]
+                      : [],
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      isConnected
-                          ? "● CONNECTED (SYNCED)"
-                          : (isConnecting ? "CONNECTING..." : "DISCONNECTED (TAP TO SET IP)"),
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: isConnected ? const Color(0xFF00E676) : (isConnecting ? Colors.amber : Colors.redAccent),
-                      ),
+                    Row(
+                      children: [
+                        Icon(
+                          isConnected
+                              ? Icons.wifi_rounded
+                              : (isConnecting ? Icons.wifi_find_rounded : Icons.wifi_off_rounded),
+                          size: 18,
+                          color: isConnected
+                              ? const Color(0xFF00E676)
+                              : (isConnecting ? Colors.amber : Colors.redAccent),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          statusMessage,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: isConnected
+                                ? const Color(0xFF00E676)
+                                : (isConnecting ? Colors.amber : Colors.redAccent),
+                          ),
+                        ),
+                      ],
                     ),
-                    Text(espIp, style: TextStyle(color: accentColor, fontSize: 11, fontWeight: FontWeight.w600)),
+                    Text(
+                      espIp,
+                      style: TextStyle(color: accentColor, fontSize: 11, fontWeight: FontWeight.bold),
+                    ),
                   ],
                 ),
               ),
             ),
             const SizedBox(height: 12),
 
-            // Card 1: Input Source
+            // Input Source
             _cardContainer(
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -266,7 +351,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Card 2: Sleep Timer
+            // Sleep Timer
             _cardContainer(
               child: Column(
                 children: [
@@ -307,7 +392,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Card 3: Master & Subwoofer Volume
+            // Master & Subwoofer Volume
             _cardContainer(
               child: Column(
                 children: [
@@ -325,7 +410,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Card 4: Tone Controls (-15 to +15 dB)
+            // Tone Controls (-15 to +15 dB)
             _cardContainer(
               child: Column(
                 children: [
@@ -361,7 +446,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Card 5: Settings & Filters
+            // Settings & Filters
             _cardContainer(
               child: Column(
                 children: [

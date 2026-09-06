@@ -37,8 +37,8 @@ class _DspControlScreenState extends State<DspControlScreen> {
   double mid = 0;
   double treble = 0;
   double gain = 5;
-  double loudness = 5;
-  String subCutoff = "80 Hz (Tight Bass)";
+  double loudness = 5; // 0 to 15
+  String subCutoff = "80 Hz (Tight Bass)"; // Includes "Flat"
   String bassCenter = "60 Hz (Sub Bass)";
   String trebleCutoff = "12.5 kHz (Crisp)";
 
@@ -61,7 +61,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
     super.dispose();
   }
 
-  // BLE Connection & Setup Listeners
   void connectToESP32() async {
     if (isConnecting || isConnected) return;
 
@@ -88,7 +87,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
                   if (c.uuid.toString().toLowerCase() == charUuid.toLowerCase()) {
                     targetCharacteristic = c;
                     _setupIncomingDataListener(c);
-                    // Ask ESP32 to send all NVS and boot values
                     _requestInitialSync();
                   }
                 }
@@ -103,14 +101,12 @@ class _DspControlScreenState extends State<DspControlScreen> {
     }
   }
 
-  // Request Hardware State
   void _requestInitialSync() {
     if (targetCharacteristic != null) {
       targetCharacteristic!.write(utf8.encode("REQ_SYNC\n"), withoutResponse: true);
     }
   }
 
-  // Listen for ESP32 notifications (Encoder Turns / NVS Sync)
   void _setupIncomingDataListener(BluetoothCharacteristic c) async {
     await c.setNotifyValue(true);
     notifySubscription = c.lastValueStream.listen((bytes) {
@@ -120,10 +116,8 @@ class _DspControlScreenState extends State<DspControlScreen> {
     });
   }
 
-  // Parse Data Coming From ESP32
   void _handleIncomingPacket(String packet) {
     if (packet.startsWith("SYNC:")) {
-      // Full Sync: "SYNC:VOL=4;SUB=20;BAS=0;MID=0;TRE=0;GAIN=5;LOUD=5;INP=BT AUDIO;SLP=OFF;SUBCUT=80 Hz (Tight Bass);BCTR=60 Hz (Sub Bass);TRECUT=12.5 kHz (Crisp)"
       String dataPart = packet.substring(5);
       List<String> items = dataPart.split(";");
       setState(() {
@@ -135,7 +129,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
         }
       });
     } else if (packet.startsWith("EVT:")) {
-      // Single live event (e.g. Physical rotary encoder rotated): "EVT:VOL=12"
       String dataPart = packet.substring(4);
       List<String> kv = dataPart.split("=");
       if (kv.length == 2) {
@@ -155,19 +148,19 @@ class _DspControlScreenState extends State<DspControlScreen> {
         subVol = (double.tryParse(val) ?? subVol).clamp(0, 30);
         break;
       case "BAS":
-        bass = (double.tryParse(val) ?? bass).clamp(-14, 14);
+        bass = (double.tryParse(val) ?? bass).clamp(-15, 15);
         break;
       case "MID":
-        mid = (double.tryParse(val) ?? mid).clamp(-14, 14);
+        mid = (double.tryParse(val) ?? mid).clamp(-15, 15);
         break;
       case "TRE":
-        treble = (double.tryParse(val) ?? treble).clamp(-14, 14);
+        treble = (double.tryParse(val) ?? treble).clamp(-15, 15);
         break;
       case "GAIN":
         gain = (double.tryParse(val) ?? gain).clamp(0, 15);
         break;
       case "LOUD":
-        loudness = (double.tryParse(val) ?? loudness).clamp(0, 10);
+        loudness = (double.tryParse(val) ?? loudness).clamp(0, 15);
         break;
       case "INP":
         inputSource = val;
@@ -187,7 +180,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
     }
   }
 
-  // Throttle Sending to ESP32 (Prevents jamming)
   int lastSend = 0;
   void sendBlePacket(String key, dynamic value) {
     int now = DateTime.now().millisecondsSinceEpoch;
@@ -218,7 +210,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 8),
 
-            // Color Palette
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -230,7 +221,6 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Connect Button
             GestureDetector(
               onTap: connectToESP32,
               child: Container(
@@ -317,6 +307,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
                 ],
               ),
             ),
+
             const SizedBox(height: 12),
 
             // Card 3: Master & Subwoofer Volume
@@ -337,7 +328,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Card 4: Tone Controls Accordion
+            // Card 4: Tone Controls (-15 to +15 dB)
             _cardContainer(
               child: Column(
                 children: [
@@ -353,17 +344,17 @@ class _DspControlScreenState extends State<DspControlScreen> {
                   ),
                   if (toneOpen) ...[
                     const SizedBox(height: 14),
-                    _sliderBlock("Bass", bass, -14, 14, (v) {
+                    _sliderBlock("Bass", bass, -15, 15, (v) {
                       setState(() => bass = v);
                       sendBlePacket("BAS", v.toInt());
                     }, unit: "dB"),
                     const SizedBox(height: 12),
-                    _sliderBlock("Mid", mid, -14, 14, (v) {
+                    _sliderBlock("Mid", mid, -15, 15, (v) {
                       setState(() => mid = v);
                       sendBlePacket("MID", v.toInt());
                     }, unit: "dB"),
                     const SizedBox(height: 12),
-                    _sliderBlock("Treble", treble, -14, 14, (v) {
+                    _sliderBlock("Treble", treble, -15, 15, (v) {
                       setState(() => treble = v);
                       sendBlePacket("TRE", v.toInt());
                     }, unit: "dB"),
@@ -373,7 +364,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
             ),
             const SizedBox(height: 12),
 
-            // Card 5: Settings & Filters Accordion
+            // Card 5: Settings & Filters (With "Flat" Option)
             _cardContainer(
               child: Column(
                 children: [
@@ -394,12 +385,12 @@ class _DspControlScreenState extends State<DspControlScreen> {
                       sendBlePacket("GAIN", v.toInt());
                     }, unit: ""),
                     const SizedBox(height: 12),
-                    _sliderBlock("Loudness", loudness, 0, 10, (v) {
+                    _sliderBlock("Loudness", loudness, 0, 15, (v) {
                       setState(() => loudness = v);
                       sendBlePacket("LOUD", v.toInt());
                     }, unit: ""),
                     const SizedBox(height: 14),
-                    _dropdownRow("Sub Cutoff", subCutoff, ["80 Hz (Tight Bass)", "100 Hz", "120 Hz"], (v) {
+                    _dropdownRow("Sub Cutoff", subCutoff, ["Flat", "80 Hz (Tight Bass)", "100 Hz", "120 Hz"], (v) {
                       setState(() => subCutoff = v!);
                       sendBlePacket("SUBCUT", v);
                     }),
@@ -506,6 +497,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
   }
 
   Widget _dropdownRow(String title, String val, List<String> list, ValueChanged<String?> onChanged) {
+    String selectedValue = list.contains(val) ? val : list.first;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -514,7 +506,7 @@ class _DspControlScreenState extends State<DspControlScreen> {
           Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
           DropdownButton<String>(
             dropdownColor: const Color(0xFF131C2E),
-            value: val,
+            value: selectedValue,
             style: TextStyle(color: accentColor, fontSize: 12),
             underline: Container(),
             items: list.map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
